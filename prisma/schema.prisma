@@ -1,0 +1,331 @@
+// BasePlate — Milestone 1.
+//
+// Money is Float. Adequate for SQLite and a personal tool; every value passes through
+// round2() at the boundaries so cents stay clean.
+// TODO: switch money columns to Decimal when migrating to Postgres.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Set {
+  setNumber   String    @id
+  name        String
+  theme       String
+  pieces      Int
+  msrp        Float
+  releaseYear Int
+  retireDate  DateTime?
+  retired     Boolean   @default(false)
+
+  valuations Valuation[]
+  listings   Listing[]
+}
+
+model Valuation {
+  id String @id @default(cuid())
+
+  setNumber String
+  // One of Condition: sealed | open_box | used_box | used_nobox | incomplete.
+  // Prisma has no native enum on SQLite and cannot emit a CHECK constraint, so validity is
+  // guarded by isCondition() at both boundaries instead of by the database.
+  // No migration was ever needed for open_box: condition is a free String and the unique index
+  // accepts any value. Nothing writes it either — CANONICAL_CONDITION is 'sealed'.
+  // TODO: native enum on Postgres.
+  condition String
+
+  sealed Float
+  /// Null when the upstream source reports no used-market data for this set (common while a
+  /// set is still in production). Null means "unknown", never "worthless" — resell_used is
+  /// reported unavailable rather than scored off an invented number.
+  usedWithBox Float?
+  usedNoBox   Float?
+  partOut     Float
+  trend       Float // fractional 30d change: 0.042 = +4.2%
+
+  fetchedAt DateTime @default(now())
+  // Day key in the app's fixed timezone (see src/db/clock.ts). Exists so the
+  // one-row-per-set/condition/day rule is a real unique index rather than a convention —
+  // Prisma+SQLite cannot build a unique index over a function of fetchedAt.
+  fetchedOn String
+
+  set Set @relation(fields: [setNumber], references: [setNumber])
+
+  @@unique([setNumber, condition, fetchedOn])
+  @@index([setNumber, fetchedAt])
+}
+
+/// Raw upstream payloads, one per set per day, written by the BrickEconomy adapter.
+///
+/// Two jobs. (1) It is the adapter's own daily cache: both the value and catalog providers
+/// read it, so one set costs at most one API call per day even across separate CLI runs —
+/// which matters against a 100-request daily quota. (2) It keeps the fields the engine
+/// doesn't model yet (forecasts, price events, used_high, subtheme) for later charting and
+/// repricing work, without those fields having to pass through the engine.
+///
+/// Deliberately unrelated to Set: this is upstream data keyed by the number as queried,
+/// and it gets written before any Set row exists.
+model SetSnapshot {
+  id String @id @default(cuid())
+
+  /// The set number exactly as queried, matching Set.setNumber and Valuation.setNumber.
+  setNumber String
+  /// Day key in the app's fixed timezone.
+  fetchedOn String
+  fetchedAt DateTime @default(now())
+
+  /// Verbatim `data` node from the API response.
+  payload String
+  /// JSON array naming any engine field that had to be derived because its source was absent.
+  derived String @default("[]")
+
+  /// True when this row records SERVING older data because the daily quota was exhausted.
+  /// A provisional row is a staleness record, not a cache entry: reads skip it, so the next
+  /// run still retries once quota frees up, while provenance still reports the staleness.
+  provisional Boolean @default(false)
+  /// For a provisional row, the day the payload was actually fetched.
+  sourceFetchedOn String?
+
+  @@unique([setNumber, fetchedOn])
+  @@index([setNumber, fetchedAt])
+}
+
+/// One BrickEconomy minifig response, one row per figure per day — the exact mirror of
+/// SetSnapshot, for the same two reasons. (1) It is the adapter's own daily cache, so a figure
+/// costs at most one request per day against the SAME 100/day allowance the sets spend.
+/// (2) It keeps the fields nothing models yet (description, price_events_new, sets) without them
+/// passing through the engine, which has no concept of a minifigure at all.
+///
+/// MEASURED 2026-07-30 against the live API — the payload is exactly twelve fields:
+///   minifig_number, name, description, set_count, sets[], theme, subtheme, year, released_date,
+///   current_value_new, price_events_new[], currency
+/// There is NO used band, NO forecast and NO growth field. A figure therefore has no trend and no
+/// forecast tier, and neither is invented; see src/lib/minifigValuePort.ts.
+///
+/// Deliberately unrelated to Set and to SetSnapshot: a figure's roster membership is re-parsed
+/// from SetSnapshot.payload at read time so there is no join table to drift out of sync, a figure
+/// can be valued directly by URL before any set containing it has been valued, and one figure
+/// belongs to many sets. A foreign key in either direction would assert an ownership that is not
+/// true.
+model MinifigSnapshot {
+  id String @id @default(cuid())
+
+  /// BrickEconomy/BrickLink id, trimmed and lowercased: "sw0509", "sw0011a", "cas559".
+  /// NEVER Rebrickable's "fig-001549" — the two id spaces have no published mapping (Rebrickable
+  /// exposes external_ids for parts but not for minifigs), so a row filed under one could never
+  /// have been fetched under the other. A variant letter is part of the identity — "sw0011a" is
+  /// Chewbacca and "sw0011" is a different figure — so unlike set numbers there is NO equivalence
+  /// rule here and nothing is normalised beyond trim + lowercase.
+  minifigNumber String
+  /// Day key in the app's fixed timezone (see src/db/clock.ts) — the unit freshness is measured
+  /// in, and the reason one-row-per-figure-per-day is a real unique index rather than a convention.
+  fetchedOn String
+  fetchedAt DateTime @default(now())
+
+  /// Verbatim `data` node from the API response.
+  ///
+  /// The ONLY place a figure's numbers live. There is deliberately no denormalised
+  /// currentValueNew column: getProvenance() in the set adapter already established that a stored
+  /// copy of a mapped value goes stale the moment the mapper changes, and re-derives from the
+  /// payload instead. A figure has at most one figure of interest and at most ~24 render at once,
+  /// so re-mapping on read costs nothing.
+  payload String
+
+  /// True when this row records SERVING older data because the daily quota was exhausted.
+  /// Identical semantics to SetSnapshot.provisional: a staleness record, not a cache entry — reads
+  /// skip it, so the next click still retries once quota frees up, while provenance keeps
+  /// disclosing the staleness.
+  provisional Boolean @default(false)
+  /// For a provisional row, the day the payload was actually fetched.
+  sourceFetchedOn String?
+
+  /// One fetch per figure per day, enforced by the database rather than by convention — this is
+  /// what writeSnapshot upserts on, and what makes a double-click cost one request.
+  @@unique([minifigNumber, fetchedOn])
+  /// Serves the newest-of-any-age read on the 429 path, and the batched `in` read for a panel.
+  @@index([minifigNumber, fetchedAt])
+}
+
+/// Figures BrickEconomy has no record of — a PERMANENT negative cache, and the single most
+/// quota-critical row in this feature.
+///
+/// MEASURED: 20 of the 151 figure ids in this database are "90398pb015".."90398pb035" — BrickLink
+/// PART numbers for Hogwarts microfigures, which BrickEconomy's set payload lists among its
+/// minifigs. Confirmed 2026-07-30 that GET /minifig/90398pb015 answers HTTP 400 with a bare
+/// `Bad Request` body. Without this table, valuing that set's figures burns 20 requests — a fifth
+/// of the daily allowance — to learn 20 nothings, and burns them again tomorrow, and the day after.
+///
+/// Keyed by minifigNumber ALONE, with no day column. That is the point: permanence is a SHAPE
+/// here, not a read policy someone can forget to implement. A day-keyed negative row would re-open
+/// the spend every midnight, which is exactly the bug this column exists to prevent.
+///
+/// Written ONLY from the `catch (error instanceof BrickEconomyUnknownMinifigError)` branch of
+/// src/db/brickeconomy/minifig/source.ts — never on a 429, never on a timeout, never from the
+/// batch loop. A quota error is not evidence of absence, and caching one would permanently mark a
+/// valuable figure unvaluable. That distinction is the whole reason this is its own table rather
+/// than a nullable flag on MinifigSnapshot: the type cannot express "absent because we couldn't
+/// ask".
+///
+/// Permanent by default, overridable ONLY by an explicit "Ask again" click, which bumps `attempts`.
+/// BrickEconomy may add a catalogue entry later; silently retrying would spend quota forever, and
+/// refusing forever would be a permanent claim built on a single observation.
+model MinifigAbsence {
+  minifigNumber String @id
+
+  /// HTTP status observed, so a 400 and a 404 stay distinguishable after the fact.
+  status Int
+  /// Day key of the first confirmation.
+  confirmedOn String
+  confirmedAt DateTime @default(now())
+  /// How many times the user has explicitly re-asked. 1 on creation.
+  attempts Int @default(1)
+}
+
+/// Sets the user is watching. setNumber is the primary key, so the database itself prevents
+/// saving the same set twice.
+///
+/// Deliberately no foreign key to Set: a curated Trending entry can be saved before it has ever
+/// been valued, and an FK would make that fail.
+model SavedSet {
+  setNumber String   @id
+  note      String?
+  addedAt   DateTime @default(now())
+}
+
+/// Permanently cached Rebrickable artwork. Set images do not change, and Rebrickable rate-limits
+/// hard and bans IPs that ignore it, so this is written once and read forever.
+model SetImage {
+  setNumber String @id
+
+  /// Null is a NEGATIVE cache: "we asked, there is no image." Without it, a set with no artwork
+  /// would be re-requested on every refresh against a rate-limited API.
+  imageUrl String?
+
+  name  String?
+  year  Int?
+  theme String?
+
+  fetchedAt DateTime @default(now())
+}
+
+/// One row per outbound HTTP attempt, so the quota meter reflects reality rather than a guess.
+/// Written from inside the HTTP clients, so a -1 variant retry counts as two and a failed 401
+/// still counts as one.
+model ApiRequest {
+  id String @id @default(cuid())
+
+  provider  String // brickeconomy | rebrickable | brickset
+  setNumber String?
+  /// The minifig number for a /minifig/{n} call, so the log can say WHICH figure spent a request.
+  /// The point of this table is exactness, and a 4-request batch logging 4 anonymous rows cannot be
+  /// audited. A SEPARATE column from setNumber rather than an overloaded one: "sw0509" is not a set
+  /// number, and a column that sometimes holds one makes every later query over this table a guess.
+  /// Null for set and list requests. Minifig calls are logged under provider 'brickeconomy' and
+  /// count against the same daily allowance, so the quota meter needs no change at all.
+  minifigNumber String?
+  /// HTTP status, or null when the request never completed.
+  status Int?
+
+  /// Day key in the app's fixed timezone — the unit the quota is measured in.
+  requestedOn String
+  requestedAt DateTime @default(now())
+
+  @@index([provider, requestedOn])
+}
+
+/// Brickset's catalogue, cached locally. This is the CANDIDATE POOL for the retiring-soon board:
+/// Brickset is cheap and bulk (hundreds of sets per request, on its own allowance), so it answers
+/// "which sets exist and when do they leave" — a question BrickEconomy's 100/day could never
+/// afford to ask.
+///
+/// Written only by an explicit "Sync retiring list" click. Every column is nullable because every
+/// field of the upstream payload is: a set with no exit date is reported as unknown, never as a
+/// guessed date.
+///
+/// Deliberately unrelated to Set: this is upstream catalogue data covering thousands of sets the
+/// engine has never valued, and an FK would make the sync fail on all of them.
+model BricksetSet {
+  /// number + "-" + numberVariant, e.g. "10312-1" — the same form Lookup and Trending use.
+  setNumber String @id
+
+  name  String?
+  theme String?
+  year  Int?
+
+  /// Brickset's retirement date. MEASURED CAVEAT: frequently a year-granularity placeholder
+  /// (December 31), which the UI labels as an end-of-year estimate rather than a hard date.
+  exitDate   DateTime?
+  launchDate DateTime?
+  /// Brickset's distribution label ("LEGO exclusive", "Retail", …). Only a retirement signal for
+  /// values proven to mean one — see RETIRING_AVAILABILITY in src/lib/retiring.ts.
+  availability String?
+
+  usRetailPrice Float?
+  /// LEGO.com's own last-available date. A separate labelled fact, never a stand-in for exitDate —
+  /// substituting it would put a guessed retirement date in front of a buy decision.
+  usDateLastAvailable DateTime?
+
+  imageUrl String?
+
+  lastSynced DateTime @default(now())
+
+  @@index([exitDate])
+}
+
+/// One row per sync run, so "has a full sync ever completed" is recorded rather than inferred.
+///
+/// Without it, a first sync that died halfway on "API limit exceeded" would still advance the
+/// incremental cursor, and every set it never reached would be skipped forever — an incomplete
+/// board that looks complete. Reads require a run with mode 'full' AND status 'ok'.
+model BricksetSyncRun {
+  id String @id @default(cuid())
+
+  mode   String // full | incremental
+  status String // ok | partial | failed
+
+  /// The incremental cursor is taken from startedAt, not finishedAt: a set updated while the run
+  /// was in flight must be picked up next time rather than fall through the gap.
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  yearFrom Int
+  yearTo   Int
+
+  requests     Int @default(0)
+  setsUpserted Int @default(0)
+
+  /// Brickset's own reported usage at pre-flight, and the day key it was read on. Usage only:
+  /// getKeyUsageStats reports what was spent and never a limit, so no limit is stored — or shown.
+  reportedUsage30d Int?
+  reportedUsageOn  String?
+
+  /// Why a run ended partial or failed, shown verbatim on the board.
+  message String?
+
+  @@index([startedAt])
+}
+
+// Schema-only in Milestone 1 — no code reads or writes this yet. It exists so the
+// listings-manager milestone starts with the migration already done.
+model Listing {
+  id String @id @default(cuid())
+
+  platform  String // one of Platform: ebay | mercari | fb_shipped | fb_local
+  url       String @unique
+  setNumber String
+  condition String // one of Condition — see the note on Valuation.condition
+  askPrice  Float
+  status    String @default("active") // active | sold | ended | draft
+
+  listedAt     DateTime @default(now())
+  daysOnMarket Int      @default(0)
+
+  set Set @relation(fields: [setNumber], references: [setNumber])
+
+  @@index([setNumber, status])
+}

@@ -1,0 +1,29 @@
+{
+  // The engine, adapters, CLI and tests — everything Node executes directly by stripping types.
+  //
+  // Kept on NodeNext resolution deliberately. Node requires explicit file extensions at runtime
+  // ('./fees.ts'), and only NodeNext enforces that at compile time. The Next-facing tsconfig
+  // uses bundler resolution, which would silently accept extensionless imports that then fail
+  // when `pnpm valuate` or `pnpm test` runs.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "erasableSyntaxOnly": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["src/**/*.tsx"]
+}

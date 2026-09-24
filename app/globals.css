@@ -1,0 +1,108 @@
+@import 'tailwindcss';
+
+/*
+ * Every colour in the app is a semantic token. Components reference roles (surface, muted,
+ * buy, warn) and never raw colours, so a theme is a token set and nothing else.
+ */
+@theme {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-buy: var(--buy);
+  --color-pass: var(--pass);
+  --color-warn: var(--warn);
+}
+
+:root {
+  /* Light */
+  --bg: oklch(98.4% 0.003 250);
+  --surface: oklch(100% 0 0);
+  --text: oklch(24% 0.015 260);
+  --muted: oklch(53% 0.018 260);
+  --border: oklch(90% 0.008 260);
+  --accent: oklch(52% 0.16 258);
+
+  /* BUY reads confident; PASS is muted and deliberately NOT an alarming error red — a pass is
+     a normal outcome, not a fault. WARN carries stale/mock notices, which must not be mistaken
+     for either verdict. */
+  --buy: oklch(48% 0.14 152);
+  --pass: oklch(48% 0.02 260);
+  --warn: oklch(52% 0.14 62);
+}
+
+:root[data-theme='dark'] {
+  --bg: oklch(17% 0.012 260);
+  --surface: oklch(21.5% 0.014 260);
+  --text: oklch(95% 0.006 260);
+  --muted: oklch(69% 0.018 260);
+  --border: oklch(30% 0.016 260);
+  --accent: oklch(74% 0.13 258);
+
+  --buy: oklch(76% 0.15 152);
+  --pass: oklch(70% 0.02 260);
+  --warn: oklch(78% 0.14 70);
+}
+
+@media (prefers-color-scheme: dark) {
+  /* System default, only while the user has not chosen explicitly. */
+  :root:not([data-theme]) {
+    --bg: oklch(17% 0.012 260);
+    --surface: oklch(21.5% 0.014 260);
+    --text: oklch(95% 0.006 260);
+    --muted: oklch(69% 0.018 260);
+    --border: oklch(30% 0.016 260);
+    --accent: oklch(74% 0.13 258);
+
+    --buy: oklch(76% 0.15 152);
+    --pass: oklch(70% 0.02 260);
+    --warn: oklch(78% 0.14 70);
+  }
+}
+
+html {
+  color-scheme: light;
+}
+html[data-theme='dark'] {
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) {
+    color-scheme: dark;
+  }
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Money and percentages must not jitter between values. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+/*
+ * There is deliberately no <dialog> styling here any more, and no <dialog> in the app.
+ *
+ * The detail view was a full-screen native dialog. It is a route now, so the rules that used to
+ * live here — a ::backdrop dim, a UA reset, and a `html:has(dialog[open]) { overflow: hidden }`
+ * scroll lock — are all dead. Removing the scroll lock is required rather than tidy: a sticky
+ * element inside an ancestor with `overflow: hidden` does not stick, and the header is sticky.
+ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

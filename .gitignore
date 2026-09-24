@@ -1,0 +1,8 @@
+node_modules/
+*.db
+*.db-journal
+.env
+.next/
+tsconfig.tsbuildinfo
+.claude/settings.local.json
+next-env.d.ts

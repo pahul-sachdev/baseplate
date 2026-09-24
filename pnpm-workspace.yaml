@@ -1,0 +1,7 @@
+# Prisma's postinstall fetches its query engine and generates the client.
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  prisma: true
+  # Next.js image optimisation.
+  sharp: true
